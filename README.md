@@ -1,6 +1,6 @@
 # guide-3d
 
-## Setup
+### Setup
 
 Request GPU:
 ```sh
@@ -41,21 +41,20 @@ pip install -r requirements.txt
 ```
 
 ### Dependencies
-LangSAM, 3DGS, SAGA.
 
 Set up LangSAM:
 ```sh
-git clone https://github.com/luca-medeiros/lang-segment-anything && cd lang-segment-anything
+pushd lang-segment-anything
 pip install -e .
-cd ..
+popd
 ```
 
 For offline LangSAM inference, download SAM and GroundingDINO:
 ```sh
-pushd checkpoints/sam
+pushd lang-segment-anything/checkpoints/sam
 wget -O checkpoints/sam2.1_hiera_small.pt "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt"
 popd
-pushd checkpoints/gdino
+pushd lang-segment-anything/checkpoints/gdino
 hf download IDEA-Research/grounding-dino-base --local-dir checkpoints/gdino/grounding-dino-base
 popd
 ```
@@ -76,9 +75,8 @@ popd
 popd
 ```
 
-Set up SAGA:
+Set up (our modified) SAGA:
 ```sh
-git clone https://github.com/Jumpat/SegAnyGAussians.git
 pushd SegAnyGAussians/third_party/segment-anything
 git clone https://github.com/facebookresearch/segment-anything.git
 pip install -e .
@@ -114,14 +112,14 @@ unzip images2.zip -d images2
 popd
 ```
 
-## Training
+## Pre-training
 
 Follow the instructions in the [3DGS repo](https://github.com/graphdeco-inria/gaussian-splatting) for pre-training on COLMAP dataset. Namely:
 ```
 python train.py -s <path to COLMAP or NeRF Synthetic dataset>
 ```
 
-## Segment 3D scene with open vocabulary
+## Open-vocabulary 3D scene segmentation
 ```sh
 pushd SegAnyGAussians
 python extract_segment_everything_masks.py --image_root "/home/zhanghy/orcd/scratch/zhanghy/guide-3d/mats/data/images1/bicycle" --sam_checkpoint_path "third_party/segment-anything-model/sam_vit_h_4b8939.pth" --downsample 4
@@ -135,7 +133,8 @@ python train_contrastive_feature.py -m "../gaussian-splatting/output/a1c12f3b-d"
 popd
 ```
 
-### Video generation from all camera views
+## Video generation
+Create video of prompt-segmented Gaussians from all camera views:
 ```sh
 python lang_seg_video.py --prompt "bicycle"
 ```
