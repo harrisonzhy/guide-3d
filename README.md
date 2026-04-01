@@ -96,6 +96,18 @@ popd
 popd
 ```
 
+Set up LineUp:
+```sh
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash
+```
+Restart kernel
+```sh
+nvm install --lts
+node -v
+npm -v
+npm install --save lineupjs
+```
+
 ## Data
 
 Download pre-trained scenes from the [3DGS repo](https://github.com/graphdeco-inria/gaussian-splatting) and Mip-NeRF 360 dataset:
