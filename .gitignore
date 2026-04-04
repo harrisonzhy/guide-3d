@@ -213,6 +213,7 @@ gaussian-splatting.vendor-backup/*
 gaussian-splatting/assets/
 gaussian-splatting/submodules/
 SegAnyGAussians/submodules/*
+SegAnyGAussians/third_party/
 gaussian-splatting/submodules/*
 gaussian-splatting/data/*
 .idea/*
