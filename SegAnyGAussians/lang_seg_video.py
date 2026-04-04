@@ -148,15 +148,20 @@ def main():
                         help='Negative prompt e.g. "bench". Suppresses matching regions.')
     parser.add_argument("--nprompt_weight", type=float, default=1.0,
                         help="How strongly to subtract negative similarity (default: 1.0).")
-    parser.add_argument("--video_path", type=str, default="output_videos/bicycle_segmented_views.mp4")
+    parser.add_argument("--video_path", type=str, default="../outputs/output.mp4")
     parser.add_argument("--fps", type=int, default=24)
-    parser.add_argument("--similarity_threshold", type=float, default=0.35,
+    parser.add_argument("--similarity_threshold", type=float, default=0.1,
                         help="Threshold for segmenting 3D Gaussians by similarity.")
     parser.add_argument("--cluster_score_threshold", type=float, default=0.45,
                         help="Min CLIP score to consider a cluster relevant.")
+    parser.add_argument("--language_mask", type=bool, default=False,
+                        help="Whether to do language segmentation masking")
     args_cli = parser.parse_args()
 
-    MODEL_PATH = "../gaussian-splatting/output/a1c12f3b-d/"
+    SCENE_NAME = os.getenv("SCENE_NAME")
+    SCENE_OUTPUT = os.getenv("SCENE_OUTPUT")
+
+    MODEL_PATH = f"../gaussian-splatting/output/{SCENE_OUTPUT}/"
     FEATURE_GAUSSIAN_ITERATION = 30000
     SCALE_GATE_PATH = os.path.join(
         MODEL_PATH, f"point_cloud/iteration_{FEATURE_GAUSSIAN_ITERATION}/scale_gate.pt"
@@ -178,7 +183,7 @@ def main():
     dataset.need_features = True
     dataset.need_masks = True
     dataset.allow_principle_point_shift = ALLOW_PRINCIPLE_POINT_SHIFT
-    dataset.source_path = "../mats/data/images1/bicycle"
+    dataset.source_path = f"../mats/data/lerf/{SCENE_NAME}"
     print("Source path:", dataset.source_path)
 
     scene_gaussians = GaussianModel(dataset.sh_degree)
@@ -506,18 +511,22 @@ def main():
             visible_gaussians = render_output["visible_gaussians"]  # indices into scene_gaussians
             pil_frame = Image.fromarray(frame)
 
-            pos_mask = predict_combined_mask(args_cli.prompt)
-            neg_mask = predict_combined_mask(args_cli.nprompt)
+            if args_cli.language_mask:
+                pos_mask = predict_combined_mask(args_cli.prompt)
+                neg_mask = predict_combined_mask(args_cli.nprompt)
 
-            if pos_mask is not None:
-                final_mask = pos_mask & (~neg_mask) if neg_mask is not None else pos_mask
-                masked_gaussians = filter_gaussians_by_mask(
-                    visible_gaussians, scene_gaussians.get_xyz, final_mask, cam, h, w
-                )
-                gaussian_vote_counts[masked_gaussians] += 1 
+                if pos_mask is not None:
+                    final_mask = pos_mask & (~neg_mask) if neg_mask is not None else pos_mask
+                    masked_gaussians = filter_gaussians_by_mask(
+                        visible_gaussians, scene_gaussians.get_xyz, final_mask, cam, h, w
+                    )
+                    gaussian_vote_counts[masked_gaussians] += 1 
 
         total_frames = len(scene.getTrainCameras())
-        threshold = total_frames * 0.3
+        if args_cli.language_mask:
+            threshold = total_frames * 0.3
+        else:
+            threshold = 0
         keep = gaussian_vote_counts >= threshold
         exclude_mask = ~keep
 

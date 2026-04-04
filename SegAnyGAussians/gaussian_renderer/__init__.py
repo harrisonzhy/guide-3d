@@ -21,7 +21,6 @@ from utils.sh_utils import eval_sh
 
 def get_visible_gaussians(radii):
     """
-    Without a depth image, we can only use frustum visibility (radii > 0).
     Returns indices of Gaussians that are within the camera frustum.
     """
     return (radii > 0).nonzero(as_tuple=False).squeeze(-1)
@@ -328,11 +327,6 @@ def render_with_depth(viewpoint_camera, pc : GaussianModel, pipe, bg_color : tor
         cov3D_precomp = cov3D_precomp)
     
     # print("Render time checker: main render", time.time() - start_time)
-
-    visible_gaussian_indices = get_visible_gaussians_by_unprojection(
-        means3D, radii, depth_image, viewpoint_camera,
-        scales=scales,  # uses each Gaussian's own scale as the distance threshold
-    )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.

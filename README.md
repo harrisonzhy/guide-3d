@@ -59,7 +59,7 @@ hf download IDEA-Research/grounding-dino-base --local-dir checkpoints/gdino/grou
 popd
 ```
 
-Set up 3DGS:
+Set up 3DGS (may need to reinstall due to versioning mismatch, if there are weird errors like CUDA OOM or unexpected arguments):
 ```sh
 git clone https://github.com/graphdeco-inria/gaussian-splatting --recursive
 pushd gaussian-splatting
@@ -67,7 +67,7 @@ pushd ./submodules/diff-gaussian-rasterization
 pip install -e . --no-build-isolation
 popd
 pushd ./submodules/simple-knn
-pip install -e . --no-build-isolation
+pip install . --no-build-isolation
 popd
 pushd ./submodules/fused-ssim
 pip install -e . --no-build-isolation
@@ -75,7 +75,7 @@ popd
 popd
 ```
 
-Set up (our modified) SAGA:
+Set up our modified SAGA (may need to reinstall due to versioning mismatch, if there are weird errors like CUDA OOM or unexpected arguments):
 ```sh
 pushd SegAnyGAussians/third_party/segment-anything
 git clone https://github.com/facebookresearch/segment-anything.git
@@ -86,10 +86,11 @@ pushd ./submodules/diff-gaussian-rasterization
 pip install -e . --no-build-isolation
 popd
 pushd ./submodules/simple-knn
-pip install -e . --no-build-isolation
+pip install . --no-build-isolation
 popd
 pushd ./submodules/diff-gaussian-rasterization_contrastive_f
 pip install -e . --no-build-isolation
+popd
 pushd ./submodules/diff-gaussian-rasterization-depth
 pip install -e . --no-build-isolation
 popd
@@ -126,27 +127,44 @@ popd
 
 ## Pre-training
 
-Follow the instructions in the [3DGS repo](https://github.com/graphdeco-inria/gaussian-splatting) for pre-training on COLMAP dataset. Namely:
-```
-python train.py -s <path to COLMAP or NeRF Synthetic dataset>
+Follow the instructions in the [3DGS repo](https://github.com/graphdeco-inria/gaussian-splatting) for pre-training on COLMAP dataset:
+```sh
+export SCENE_NAME=kitchen
+python train.py -s "../mats/data/lerf/${SCENE_NAME}"
 ```
 
 ## Open-vocabulary 3D scene segmentation
+
+First, set the scene output:
+```sh
+export SCENE_OUTPUT=ee635da2-0
+```
+Then run segmentation:
 ```sh
 pushd SegAnyGAussians
-python extract_segment_everything_masks.py --image_root "/home/zhanghy/orcd/scratch/zhanghy/guide-3d/mats/data/images1/bicycle" --sam_checkpoint_path "third_party/segment-anything-model/sam_vit_h_4b8939.pth" --downsample 4
+run_saga.sh
+popd
+```
+Or:
+```sh
+pushd SegAnyGAussians
+python extract_segment_everything_masks.py --image_root "/home/zhanghy/orcd/scratch/zhanghy/guide-3d/mats/data/lerf/${SCENE_NAME}" --sam_checkpoint_path "third_party/segment-anything-model/sam_vit_h_4b8939.pth" --downsample 4
 
-python get_scale.py --image_root "../mats/data/images1/bicycle" --source "../mats/data/images1/bicycle" --model_path "../gaussian-splatting/output/a1c12f3b-d"
+python get_scale.py --image_root "../mats/data/lerf/${SCENE_NAME}" --source "../mats/data/lerf/${SCENE_NAME}" --model_path "../gaussian-splatting/output/${SCENE_OUTPUT}"
 popd
 sh clip.sh
 pushd SegAnyGAussians
-python get_clip_features.py --image_root "../mats/data/images1/bicycle"
-python train_contrastive_feature.py -m "../gaussian-splatting/output/a1c12f3b-d" --iteration 30000 --num_sampled_rays 1000
+python get_clip_features.py --image_root "../mats/data/lerf/${SCENE_NAME}"
+python train_contrastive_feature.py -m "../gaussian-splatting/output/${SCENE_OUTPUT}" --iteration 30000 --num_sampled_rays 1000
 popd
 ```
 
 ## Video generation
-Create video of prompt-segmented Gaussians from all camera views:
+
+Stitch video of prompt-segmented Gaussians from all camera views:
 ```sh
-python lang_seg_video.py --prompt "bicycle"
+python lang_seg_video.py \
+--prompt "bulldozer" \
+--similarity_threshold 0.1 \
+--cluster_score_threshold 0.45
 ```

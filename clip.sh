@@ -13,7 +13,8 @@ snap = snapshot_download(
     local_dir_use_symlinks=False,
 )
 print("downloaded to:", snap)
-open_clip.create_model_and_transforms("ViT-B-16", pretrained="laion2b_s34b_b88k")
+# open_clip.create_model_and_transforms("ViT-B-16", pretrained="laion2b_s34b_b88k")
+open_clip.create_model_and_transforms("ViT-L-14", pretrained="laion2b_s32b_b82k")
 print("ok")
 PY
 
@@ -23,5 +24,7 @@ WEIGHT=$(find "$CKPT_DIR" -type f \( -name "*.bin" -o -name "*.pt" -o -name "*.p
   -exec ls -l {} \; | sort -k5 -n | tail -n 1 | awk '{print $NF}')
 
 echo "Using weights: $WEIGHT"
-mv "$WEIGHT" ../sagav2/clip_ckpt/ViT-B-16-laion2b_s34b_b88k.bin
-ls -lah ../sagav2/clip_ckpt/ViT-B-16-laion2b_s34b_b88k.bin
+# mv "$WEIGHT" ../sagav2/clip_ckpt/ViT-B-16-laion2b_s34b_b88k.bin
+# ls -lah ../sagav2/clip_ckpt/ViT-B-16-laion2b_s34b_b88k.bin
+mv "$WEIGHT" ../sagav2/clip_ckpt/ViT-L-14-laion2b_s32b_b82k.bin
+ls -lah ../sagav2/clip_ckpt/ViT-L-14-laion2b_s32b_b82k.bin
