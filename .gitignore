@@ -210,3 +210,8 @@ marimo/_lsp/
 __marimo__/
 
 gaussian-splatting.vendor-backup/*
+gaussian-splatting/assets/
+SegAnyGAussians/submodules/*
+gaussian-splatting/submodules/*
+gaussian-splatting/data/*
+.idea/*

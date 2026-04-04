@@ -58,6 +58,13 @@ if __name__ == '__main__':
         img = cv2.imread(os.path.join(IMAGE_DIR, path))
         if downsample_manually:
             img = cv2.resize(img,dsize=(img.shape[1] // args.downsample, img.shape[0] // args.downsample),fx=1,fy=1,interpolation=cv2.INTER_LINEAR)
+
+        MAX_LONG_EDGE = 1024
+        h, w = img.shape[:2]
+        long_edge = max(h, w)
+        if long_edge > MAX_LONG_EDGE:
+            scale = MAX_LONG_EDGE / long_edge
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
         masks = mask_generator.generate(img)
         # print(len(masks))
         mask_list = []
