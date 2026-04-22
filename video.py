@@ -16,6 +16,38 @@ from torch.amp import autocast as autocast
 
 torch.set_default_dtype(torch.float32)
 
+
+"""
+INTENDED USAGE PATTERN:
+
+from video import initialization, import_path, segment, write_video, update_pickle
+from pathlib import Path
+
+initialization()
+
+model_path = Path(".../models/scene1")
+data_root  = Path(".../colmap_project")
+output_dir = Path(".../outputs")
+iteration  = 7000
+text_prompt = "tractor"
+
+scene, train_cams, dataset, pipe = import_path(model_path, data_root, output_dir, iteration) <- Load cameras and create scene when users specify paths
+
+masks_by_name = segment(scene, train_cams, dataset, text_prompt) <- computes the masks for all pics by user text prompt
+
+rows, out_path = write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, scene, pipe) <- writes the video to output folder, out_path is where the video is, including its name, rows is data for lineup
+
+update_pickle(rows, output_dir) <- given new rows, update pickle file if there already exists one, create one if doesn't exist
+
+pickle file is at output_dir / "data.pkl"
+
+other functions in here are helpers.
+
+If any bugs, tell me.
+"""
+
+
+
 def initialization():
     # This is code to fix path for me so imports are good, and designed be called upon initialization
     PROJECT_ROOT = Path(__file__).resolve().parent
@@ -24,15 +56,14 @@ def initialization():
     sys.path.append(str(knn_root))
     sys.path.append(str(gs_root))
     print("last sys.path entries:", sys.path[-2:])
-    sys.path.append(str(gs_root))
     return None
 
 
-def import_path(model_path, ply_path, data_root, output_dir):
+def import_path(model_path, data_root, output_dir, iteration):
 
     # check these two paths exists before putting them in
     # here I assume they exist.
-    # model_path: scene output dir, ply_path: scene file,  
+    # model_path: scene output dir, iteration: which iteration inside the model_path,  
     # data_root: images that include sparce and images folder, output_dir: where the video will be
 
     from scene import Scene, GaussianModel
@@ -45,8 +76,6 @@ def import_path(model_path, ply_path, data_root, output_dir):
     images.sort(key=lambda im: im.image_id)  # deterministic order
 
     print(f"Loaded {len(images)} registered images.")
-    gaussians = GaussianModel(sh_degree=3)
-    gaussians.load_ply(str(ply_path)) 
 
     parser = argparse.ArgumentParser(description="Inference params")
     lp = ModelParams(parser)
@@ -64,8 +93,11 @@ def import_path(model_path, ply_path, data_root, output_dir):
     dataset = lp.extract(args)   # same object they call "dataset" in training()
     pipe    = pp.extract(args)
         
-    gaussians = GaussianModel(dataset.sh_degree, optimizer_type="adam")  # optimizer_type only matters for training
-    scene = Scene(dataset, gaussians, load_iteration=7000, shuffle=False, resolution_scales=[1.0])
+    gaussians = GaussianModel(dataset.sh_degree, optimizer_type="adam")
+    scene = Scene(dataset, gaussians,
+              load_iteration=iteration,
+              shuffle=False,
+              resolution_scales=[1.0])
 
     # Now scene.gaussians and scene.getTrainCameras() / getTestCameras() are ready
     train_cams = scene.getTrainCameras(scale=1.0)   # list of Camera
@@ -170,7 +202,7 @@ def segment(scene, train_cams, dataset, text_prompt):
 
         torch.cuda.empty_cache()
 
-        return masks_by_name
+    return masks_by_name
 
 
 def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, train_test_exp=False):
@@ -211,7 +243,7 @@ def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, train_
 
     mask = masks_by_name.get(cam.image_name, None)
     if mask is None:
-        return None, None, None, None
+        return None, None, None, None, None
     else:
         mask = (mask > 0).astype(np.uint8)  # ensure 0/1
         gt_np_masked  = apply_mask(gt_np_for_sam,  mask)
@@ -285,7 +317,7 @@ def apply_mask(img_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return out
 
 # %%
-def write_video(output_dir, train_cams, dataset, text_prompt, scene, pipe):
+def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, scene, pipe):
     rows = []
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -296,6 +328,7 @@ def write_video(output_dir, train_cams, dataset, text_prompt, scene, pipe):
     prompt_str = str(text_prompt).replace(" ", "_")      # replace spaces with _
     prompt_str = prompt_str.replace("/", "_")       # avoid path separators
     out_path = output_dir / f"comparison_{prompt_str}.avi"
+    
     writer = cv2.VideoWriter(str(out_path), fourcc, 5, (2*W0, H0))
     print("writer opened:", writer.isOpened())
 
@@ -305,7 +338,7 @@ def write_video(output_dir, train_cams, dataset, text_prompt, scene, pipe):
             scene.gaussians,
             pipe,
             background,
-            text_prompt,
+            masks_by_name,
             train_test_exp=dataset.train_test_exp
         )
         if frame is None:
@@ -328,6 +361,7 @@ def write_video(output_dir, train_cams, dataset, text_prompt, scene, pipe):
 
     writer.release()
     print("wrote", out_path)
+    return rows, out_path
 
 # %%
 def update_pickle(rows, output_dir):
