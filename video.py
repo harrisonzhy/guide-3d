@@ -1,18 +1,26 @@
 # %%
-import os
+import sys
 from pathlib import Path
+
+# Make gaussian-splatting visible for imports like `from utils...`
+PROJECT_ROOT = Path(__file__).resolve().parent
+gs_root = PROJECT_ROOT / "gaussian-splatting"
+sys.path.append(str(gs_root))
+print(sys.executable)
+
+import os
 import cv2
 import numpy as np
 import torch
 import pycolmap
 from PIL import Image
 import contextlib, io
-import sys, argparse
-from lang_sam import LangSAM
+import argparse
+
 from utils.loss_utils import l1_loss, ssim
 from utils.image_utils import psnr
 import pandas as pd
-from torch.amp import autocast as autocast
+from torch.cuda.amp import autocast
 
 torch.set_default_dtype(torch.float32)
 
@@ -105,6 +113,16 @@ def import_path(model_path, data_root, output_dir, iteration):
 
     print("train cams:", len(train_cams), "test cams:", len(test_cams))
 
+    # Ensure gaussians are float32 for rasterizer
+    attrs = ["_xyz", "_features_dc", "_features_rest",
+             "_scaling", "_rotation", "_opacity"]
+
+    for name in attrs:
+        t = getattr(scene.gaussians, name, None)
+        if isinstance(t, torch.Tensor) and t.dtype != torch.float32:
+            print(f"Converting {name} from {t.dtype} to float32")
+            setattr(scene.gaussians, name, t.float())
+
     return scene, train_cams, dataset, pipe
 
 
@@ -145,17 +163,8 @@ def predict_masks_safe_batch(langsam_model, images_pil, texts_prompt):
         return results
 
 def segment(scene, train_cams, dataset, text_prompt):
-    attrs = ["_xyz", "_features_dc", "_features_rest",
-            "_scaling", "_rotation", "_opacity"]
-
-    for name in attrs:
-        t = getattr(scene.gaussians, name, None)
-        if isinstance(t, torch.Tensor) and t.dtype != torch.float32:
-            print(f"Converting {name} from {t.dtype} to float32")
-            setattr(scene.gaussians, name, t.float())
     torch.cuda.empty_cache()
-
-
+    from lang_sam import LangSAM
     device = "cuda:0"
     langsam_model = LangSAM(device=device)
 
@@ -210,6 +219,7 @@ def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, train_
     Render gaussians from `cam`, compute metrics vs cam.original_image,
     and return a labeled [GT | render] frame (H, 2W, 3, uint8) plus (L1, SSIM, PSNR).
     """
+    
     from gaussian_renderer import render
     try:
         from fused_ssim import fused_ssim
@@ -217,10 +227,26 @@ def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, train_
     except ImportError:
         FUSED_SSIM_AVAILABLE = False
 
-    # --- render (once) ---
+# --- ensure ALL gaussians tensors are float32 before render ---
+    for attr in dir(gaussians):
+        t = getattr(gaussians, attr, None)
+        if isinstance(t, torch.Tensor) and t.dtype == torch.bfloat16:
+            # print once if you want to see what got fixed
+            print("Casting", attr, "from bfloat16 to float32")
+            setattr(gaussians, attr, t.float())
+
+    '''
+    print("=== DTYPE CHECK ===")
+    for name in ["_xyz", "_features_dc", "_features_rest",
+             "_scaling", "_rotation", "_opacity"]:
+        t = getattr(gaussians, name, None)
+        print(name, t.dtype if isinstance(t, torch.Tensor) else type(t))
+        '''
+
+    # --- render (once) ----
 
     with torch.no_grad():
-        with autocast('cuda', enabled=False):
+        with autocast(enabled=False):
             pkg = render(cam, gaussians, pipe, background,
                      use_trained_exp=train_test_exp)
             img = torch.clamp(pkg["render"], 0.0, 1.0)  # (3,H,W)
@@ -317,7 +343,7 @@ def apply_mask(img_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return out
 
 # %%
-def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, scene, pipe):
+def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, scene, pipe, scene_name):
     rows = []
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -327,7 +353,9 @@ def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, sce
     fourcc = cv2.VideoWriter_fourcc(*"MJPG")
     prompt_str = str(text_prompt).replace(" ", "_")      # replace spaces with _
     prompt_str = prompt_str.replace("/", "_")       # avoid path separators
-    out_path = output_dir / f"comparison_{prompt_str}.avi"
+
+    scene_str = str(scene_name).replace(" ", "_").replace("/", "_")
+    out_path = output_dir / f"comparison_{scene_str}_{prompt_str}.avi"
     
     writer = cv2.VideoWriter(str(out_path), fourcc, 5, (2*W0, H0))
     print("writer opened:", writer.isOpened())
@@ -364,11 +392,13 @@ def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, sce
     return rows, out_path
 
 # %%
-def update_pickle(rows, output_dir):
+def update_pickle(rows, output_dir, scene_name):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pkl_path = output_dir / "data.pkl"
+    scene_str = str(scene_name).replace(" ", "_").replace("/", "_")
+
+    pkl_path = output_dir / f"{scene_name}.pkl"
 
     # New data as DataFrame
     new_df = pd.DataFrame(rows)
@@ -382,4 +412,10 @@ def update_pickle(rows, output_dir):
         df = new_df
 
     df.to_pickle(pkl_path)
+
+def delete_object(rows, output_dir, scene_name, text_prompt):
+    df = pd.DataFrame(rows)
+    df = df[df["object"] != obj_to_remove]
+    rows = df.to_dict(orient="records")
+    update_pickle(rows, output_dir, scene_name)
 
