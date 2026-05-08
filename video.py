@@ -1,20 +1,32 @@
 # %%
-import os
+import sys
 from pathlib import Path
+
+# Make gaussian-splatting visible for imports like `from utils...`
+PROJECT_ROOT = Path(__file__).resolve().parent
+gs_root = PROJECT_ROOT / "gaussian-splatting"
+sys.path.append(str(gs_root))
+print(sys.executable)
+
+import os
 import cv2
 import numpy as np
 import torch
 import pycolmap
 from PIL import Image
 import contextlib, io
-import sys, argparse
-from lang_sam import LangSAM
+import argparse
+
 from utils.loss_utils import l1_loss, ssim
 from utils.image_utils import psnr
 import pandas as pd
-from torch.amp import autocast as autocast
+from torch.cuda.amp import autocast
 
 torch.set_default_dtype(torch.float32)
+
+import lpips
+
+lpips_model = lpips.LPIPS(net='vgg').to("cuda").eval()
 
 
 """
@@ -45,7 +57,14 @@ other functions in here are helpers.
 
 If any bugs, tell me.
 """
-
+def get_intrinsics(cam):
+    W = cam.image_width
+    H = cam.image_height
+    fx = W / (2.0 * np.tan(cam.FoVx / 2.0))
+    fy = H / (2.0 * np.tan(cam.FoVy / 2.0))
+    cx = W / 2.0
+    cy = H / 2.0
+    return fx, fy, cx, cy
 
 
 def initialization():
@@ -57,6 +76,27 @@ def initialization():
     sys.path.append(str(gs_root))
     print("last sys.path entries:", sys.path[-2:])
     return None
+
+def compute_neighbors(train_cams, k=3):
+    """
+    Returns: dict[image_name] -> list of neighbor indices in train_cams
+    """
+    centers = []
+    for cam in train_cams:
+        C = cam.camera_center.detach().cpu().numpy()  # (3,)
+        centers.append(C)
+    centers = np.stack(centers, axis=0)  # (N,3)
+
+    neighbors = {}
+    N = len(train_cams)
+    for i, cam in enumerate(train_cams):
+        Ci = centers[i]
+        dists = np.linalg.norm(centers - Ci, axis=1)
+        order = np.argsort(dists)
+        # skip self (0th), take next k
+        nn = [int(j) for j in order[1:k+1] if j < N]
+        neighbors[cam.image_name] = nn
+    return neighbors
 
 
 def import_path(model_path, data_root, output_dir, iteration):
@@ -105,7 +145,19 @@ def import_path(model_path, data_root, output_dir, iteration):
 
     print("train cams:", len(train_cams), "test cams:", len(test_cams))
 
-    return scene, train_cams, dataset, pipe
+    # Ensure gaussians are float32 for rasterizer
+    attrs = ["_xyz", "_features_dc", "_features_rest",
+             "_scaling", "_rotation", "_opacity"]
+
+    for name in attrs:
+        t = getattr(scene.gaussians, name, None)
+        if isinstance(t, torch.Tensor) and t.dtype != torch.float32:
+            print(f"Converting {name} from {t.dtype} to float32")
+            setattr(scene.gaussians, name, t.float())
+
+    neighbors = compute_neighbors(train_cams, k=3)
+
+    return scene, train_cams, dataset, pipe, neighbors
 
 
 def quiet_predict(model, images_pil, texts_prompt):
@@ -145,17 +197,8 @@ def predict_masks_safe_batch(langsam_model, images_pil, texts_prompt):
         return results
 
 def segment(scene, train_cams, dataset, text_prompt):
-    attrs = ["_xyz", "_features_dc", "_features_rest",
-            "_scaling", "_rotation", "_opacity"]
-
-    for name in attrs:
-        t = getattr(scene.gaussians, name, None)
-        if isinstance(t, torch.Tensor) and t.dtype != torch.float32:
-            print(f"Converting {name} from {t.dtype} to float32")
-            setattr(scene.gaussians, name, t.float())
     torch.cuda.empty_cache()
-
-
+    from lang_sam import LangSAM
     device = "cuda:0"
     langsam_model = LangSAM(device=device)
 
@@ -205,11 +248,12 @@ def segment(scene, train_cams, dataset, text_prompt):
     return masks_by_name
 
 
-def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, train_test_exp=False):
+def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, depth_cache, train_test_exp=False):
     """
     Render gaussians from `cam`, compute metrics vs cam.original_image,
     and return a labeled [GT | render] frame (H, 2W, 3, uint8) plus (L1, SSIM, PSNR).
     """
+    
     from gaussian_renderer import render
     try:
         from fused_ssim import fused_ssim
@@ -217,13 +261,33 @@ def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, train_
     except ImportError:
         FUSED_SSIM_AVAILABLE = False
 
-    # --- render (once) ---
+# --- ensure ALL gaussians tensors are float32 before render ---
+    for attr in dir(gaussians):
+        t = getattr(gaussians, attr, None)
+        if isinstance(t, torch.Tensor) and t.dtype == torch.bfloat16:
+            # print once if you want to see what got fixed
+            print("Casting", attr, "from bfloat16 to float32")
+            setattr(gaussians, attr, t.float())
+
+    '''
+    print("=== DTYPE CHECK ===")
+    for name in ["_xyz", "_features_dc", "_features_rest",
+             "_scaling", "_rotation", "_opacity"]:
+        t = getattr(gaussians, name, None)
+        print(name, t.dtype if isinstance(t, torch.Tensor) else type(t))
+        '''
+
+    # --- render (once) ----
 
     with torch.no_grad():
-        with autocast('cuda', enabled=False):
+        with autocast(enabled=False):
             pkg = render(cam, gaussians, pipe, background,
                      use_trained_exp=train_test_exp)
             img = torch.clamp(pkg["render"], 0.0, 1.0)  # (3,H,W)
+            depth = pkg.get("depth", None)
+            if depth is not None:
+                # store on CPU, (H,W)
+                depth_cache[cam.image_name] = depth.squeeze().detach().cpu()
 
     gt = torch.clamp(cam.original_image.to(img.device), 0.0, 1.0)
 
@@ -243,7 +307,7 @@ def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, train_
 
     mask = masks_by_name.get(cam.image_name, None)
     if mask is None:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     else:
         mask = (mask > 0).astype(np.uint8)  # ensure 0/1
         gt_np_masked  = apply_mask(gt_np_for_sam,  mask)
@@ -262,6 +326,16 @@ def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, train_
         ssim_val = ssim(img, gt).double()
 
     psnr_val = psnr(img, gt).mean().double()
+
+    # --- LPIPS (masked) ---
+    # LPIPS expects [-1,1] range, NCHW
+    img_lp = (img * 2.0 - 1.0).unsqueeze(0)  # (1,3,H,W)
+    gt_lp  = (gt  * 2.0 - 1.0).unsqueeze(0)
+
+    with torch.no_grad():
+        lpips_val = lpips_model(img_lp, gt_lp)   # shape [1,1] or [1]
+
+    lpips_val = float(lpips_val.mean().item())
 
     mask_bool = mask.astype(bool)
     num_masked = int(mask_bool.sum())
@@ -288,17 +362,18 @@ def render_metrics_frame(cam, gaussians, pipe, background, masks_by_name, train_
     frame = cv2.hconcat([gt_bgr, rend_bgr])
 
     # overlay text *after* concat
-    name_text   = cam.image_name
-    metric_text = f"SSIM {ssim_val.item():.3f}  PSNR {psnr_val.item():.2f} dB"
+    name_text    = cam.image_name
+    metric_text1 = f"L1 {L1_val:.4f}  SSIM {ssim_val.item():.3f}  PSNR {psnr_val.item():.2f} dB"
+    metric_text2 = f"LPIPS {lpips_val:.3f}"
+    
+    cv2.putText(frame, name_text,    (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.putText(frame, metric_text1, (20, 80),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.putText(frame, metric_text2, (20, 120),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
 
-    cv2.putText(frame, name_text, (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0,
-                (0, 255, 0), 2, cv2.LINE_AA)
-    cv2.putText(frame, metric_text, (20, 80),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0,
-                (0, 255, 0), 2, cv2.LINE_AA)
-
-    return frame, float(L1_val), float(ssim_val), float(psnr_val), num_masked
+    return frame, float(L1_val), float(ssim_val), float(psnr_val), num_masked, lpips_val
 
 # %%
 def apply_mask(img_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -317,8 +392,130 @@ def apply_mask(img_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return out
 
 # %%
-def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, scene, pipe):
+
+def compute_depth_errs(train_cams, depth_cache, masks_by_name, neighbors, max_samples_per_view=5000):
+    """
+    Compute masked cross-view depth consistency error per view.
+
+    Returns: dict[image_name] -> float or None
+    """
+    depth_errs = {}
+
+    for i, camA in enumerate(train_cams):
+        nameA = camA.image_name
+        maskA = masks_by_name.get(nameA)
+        depthA = depth_cache.get(nameA)
+        if maskA is None or depthA is None:
+            depth_errs[nameA] = None
+            continue
+
+        maskA_bool = maskA.astype(bool)
+        ys, xs = np.where(maskA_bool)
+        if ys.size == 0:
+            depth_errs[nameA] = None
+            continue
+
+        # optionally subsample pixels for speed
+        if ys.size > max_samples_per_view:
+            idx = np.random.choice(ys.size, max_samples_per_view, replace=False)
+            ys = ys[idx]
+            xs = xs[idx]
+
+        depthA_np = depthA.numpy()  # (H,W)
+
+        fxA, fyA, cxA, cyA = get_intrinsics(camA)
+
+        # camera A: world<->cam matrices
+        W2C_A = camA.world_view_transform.detach().cpu().numpy()  # 4x4, world -> cam
+        C2W_A = np.linalg.inv(W2C_A)                              # cam -> world
+
+        errs = []
+        # loop over neighbor views
+        for j_idx in neighbors.get(nameA, []):
+            camB = train_cams[j_idx]
+            nameB = camB.image_name
+            depthB = depth_cache.get(nameB)
+            if depthB is None:
+                continue
+            depthB_np = depthB.numpy()
+            H_B, W_B = depthB_np.shape
+
+            fxB, fyB, cxB, cyB = get_intrinsics(camB)
+            W2C_B = camB.world_view_transform.detach().cpu().numpy()
+            # no need for C2W_B for this metric; we use z in B's frame and depthB for comparison
+
+            # for each masked pixel in A
+            for y, x in zip(ys, xs):
+                zA = depthA_np[y, x]
+                if zA <= 0:
+                    continue
+
+                # 1) backproject p in A to 3D point in camera A
+                X_camA = np.array([
+                    (x - cxA) / fxA * zA,
+                    (y - cyA) / fyA * zA,
+                    zA,
+                    1.0,
+                ], dtype=np.float32)
+
+                # cam A -> world
+                X_world = C2W_A @ X_camA  # (4,)
+                X_world3 = X_world[:3] / X_world[3]
+
+                # world -> cam B
+                X_camB = W2C_B @ np.concatenate([X_world3, np.array([1.0], dtype=np.float32)])
+                X_camB3 = X_camB[:3]
+
+                z_pred = X_camB3[2]
+                if z_pred <= 0:
+                    continue
+
+                # project into B's image
+                u_pred = fxB * X_camB3[0] / z_pred + cxB
+                v_pred = fyB * X_camB3[1] / z_pred + cyB
+
+                if not (0 <= u_pred < W_B - 1 and 0 <= v_pred < H_B - 1):
+                    continue
+
+                # bilinear sample B's depth
+                x0 = int(np.floor(u_pred))
+                x1 = x0 + 1
+                y0 = int(np.floor(v_pred))
+                y1 = y0 + 1
+                dx = u_pred - x0
+                dy = v_pred - y0
+
+                d00 = depthB_np[y0, x0]
+                d10 = depthB_np[y0, x1]
+                d01 = depthB_np[y1, x0]
+                d11 = depthB_np[y1, x1]
+                if (d00 <= 0) and (d10 <= 0) and (d01 <= 0) and (d11 <= 0):
+                    continue
+
+                dB = (
+                    d00 * (1 - dx) * (1 - dy) +
+                    d10 * dx       * (1 - dy) +
+                    d01 * (1 - dx) * dy       +
+                    d11 * dx       * dy
+                )
+
+                if dB <= 0:
+                    continue
+
+                # reprojection depth error in B's camera frame (z-coordinate)
+                err = abs(z_pred - dB)
+                errs.append(err)
+
+        if len(errs) == 0:
+            depth_errs[nameA] = None
+        else:
+            depth_errs[nameA] = float(np.mean(errs))
+
+    return depth_errs
+
+def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, scene, pipe, scene_name, neighbors):
     rows = []
+    depth_cache = {}
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -327,18 +524,21 @@ def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, sce
     fourcc = cv2.VideoWriter_fourcc(*"MJPG")
     prompt_str = str(text_prompt).replace(" ", "_")      # replace spaces with _
     prompt_str = prompt_str.replace("/", "_")       # avoid path separators
-    out_path = output_dir / f"comparison_{prompt_str}.avi"
+
+    scene_str = str(scene_name).replace(" ", "_").replace("/", "_")
+    out_path = output_dir / f"comparison_{scene_str}_{prompt_str}.avi"
     
     writer = cv2.VideoWriter(str(out_path), fourcc, 5, (2*W0, H0))
     print("writer opened:", writer.isOpened())
 
     for i, cam in enumerate(train_cams):
-        frame, L1, ssim_val, psnr_val, total_pixels = render_metrics_frame(
+        frame, L1, ssim_val, psnr_val, total_pixels, lpips_val = render_metrics_frame(
             cam,
             scene.gaussians,
             pipe,
             background,
             masks_by_name,
+            depth_cache,
             train_test_exp=dataset.train_test_exp
         )
         if frame is None:
@@ -351,6 +551,7 @@ def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, sce
         "SSIM": ssim_val,
         "PSNR_dB": psnr_val,
         "total_pixels": total_pixels,
+        "LPIPS": lpips_val,
         })
 
         # sanity: show pixel stats so we know frame content changes
@@ -361,25 +562,52 @@ def write_video(output_dir, train_cams, dataset, text_prompt, masks_by_name, sce
 
     writer.release()
     print("wrote", out_path)
+    depth_errs = compute_depth_errs(train_cams, depth_cache, masks_by_name, neighbors)
+    for row in rows:
+        name = row["image_name"]
+        row["depth_err"] = depth_errs.get(name)
     return rows, out_path
 
 # %%
-def update_pickle(rows, output_dir):
+def update_pickle(rows, output_dir, scene_name):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pkl_path = output_dir / "data.pkl"
+    scene_str = str(scene_name).replace(" ", "_").replace("/", "_")
+    pkl_path = output_dir / f"{scene_str}.pkl"
 
-    # New data as DataFrame
     new_df = pd.DataFrame(rows)
-
+    if new_df.empty:
+        return  # nothing to update
+        
+    # New data as DataFrame
     if pkl_path.exists():
         # Load existing and append
         old_df = pd.read_pickle(pkl_path)
+        objs = new_df["object"].unique()
+
+        # drop any rows with these objects from the old df
+        old_df = old_df[~old_df["object"].isin(objs)]
+
+        # append new rows
         df = pd.concat([old_df, new_df], ignore_index=True)
     else:
         # First time: just use new_df
         df = new_df
 
+    df.to_pickle(pkl_path)
+
+def delete_object(output_dir, scene_name, text_prompt):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    scene_str = str(scene_name).replace(" ", "_").replace("/", "_")
+    pkl_path = output_dir / f"{scene_str}.pkl"
+
+    if not pkl_path.exists():
+        return
+
+    df = pd.read_pickle(pkl_path)
+    df = df[df["object"] != text_prompt]
     df.to_pickle(pkl_path)
 
