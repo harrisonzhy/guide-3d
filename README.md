@@ -159,6 +159,29 @@ python train_contrastive_feature.py -m "../gaussian-splatting/output/${SCENE_OUT
 popd
 ```
 
+## Interactive GUI
+
+The project includes a Streamlit-based GUI (`app.py`) for interactive 3DGS viewing and per-object quality ranking via LineUp tables.
+
+**Prerequisites:** trained 3DGS models under `gaussian-splatting/models/<scene>/` (with `cameras.json` and `point_cloud/iteration_30000/point_cloud.ply`) and pre-computed metrics at `metrics/<scene>.pkl`.
+
+Install the additional Python dependencies:
+```sh
+pip install streamlit pandas numpy
+```
+
+Launch the app:
+```sh
+streamlit run app.py
+```
+
+This opens a browser tab where you can:
+- Select a scene and filter objects from the sidebar
+- Orbit, pan, and zoom the embedded 3D Gaussian Splat viewer
+- Jump to the best/worst camera view per object
+- Toggle a ground-truth image side panel
+- Build custom rankings in the interactive LineUp tables (drag columns, add weighted sums, filter by range)
+
 ## Video generation
 
 Stitch video of prompt-segmented Gaussians from all camera views:
