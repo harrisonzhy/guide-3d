@@ -46,7 +46,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         debug=pipe.debug,
-        antialiasing=pipe.antialiasing
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -87,27 +86,25 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         colors_precomp = override_color
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
+    raster_args = dict(
+        means3D=means3D,
+        means2D=means2D,
+        shs=shs,
+        colors_precomp=colors_precomp,
+        opacities=opacity,
+        scales=scales,
+        rotations=rotations,
+        cov3D_precomp=cov3D_precomp,
+    )
     if separate_sh:
-        rendered_image, radii, depth_image = rasterizer(
-            means3D = means3D,
-            means2D = means2D,
-            dc = dc,
-            shs = shs,
-            colors_precomp = colors_precomp,
-            opacities = opacity,
-            scales = scales,
-            rotations = rotations,
-            cov3D_precomp = cov3D_precomp)
+        raster_args["dc"] = dc
+
+    result = rasterizer(**raster_args)
+    if len(result) == 3:
+        rendered_image, radii, depth_image = result
     else:
-        rendered_image, radii, depth_image = rasterizer(
-            means3D = means3D,
-            means2D = means2D,
-            shs = shs,
-            colors_precomp = colors_precomp,
-            opacities = opacity,
-            scales = scales,
-            rotations = rotations,
-            cov3D_precomp = cov3D_precomp)
+        rendered_image, radii = result
+        depth_image = None
         
     # Apply exposure to rendered image (training only)
     if use_trained_exp:

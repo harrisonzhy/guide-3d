@@ -99,6 +99,7 @@ shellingham==1.5.4
 simple_knn @ file:///orcd/scratch/orcd/010/zhanghy/zhanghy/guide-3d/SegAnyGAussians/submodules/simple-knn
 six==1.17.0
 starlette==0.52.1
+streamlit==1.52.0
 supervision==0.27.0.post1
 sympy==1.13.1
 threadpoolctl==3.6.0

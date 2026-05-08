@@ -549,8 +549,9 @@ class GaussianSplattingGUI:
         mean = torch.mean(X, dim=0)
         X = X - mean
         covariance_matrix = (1 / n) * torch.matmul(X.T, X).float()  # An old torch bug: matmul float32->float16, 
-        eigenvalues, eigenvectors = torch.eig(covariance_matrix, eigenvectors=True)
-        eigenvalues = torch.norm(eigenvalues, dim=1)
+        eigenvalues_complex, eigenvectors_complex = torch.linalg.eig(covariance_matrix)
+        eigenvalues = eigenvalues_complex.real
+        eigenvectors = eigenvectors_complex.real
         idx = torch.argsort(-eigenvalues)
         eigenvectors = eigenvectors[:, idx]
         proj_mat = eigenvectors[:, 0:n_components]
